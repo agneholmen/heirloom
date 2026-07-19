@@ -186,6 +186,28 @@ class Person(models.Model):
     def has_death_event(self):
         return Event.objects.filter(person=self, event_type='death').exists()
 
+    def _event_sources_payload(self, event_obj):
+        return [
+            {
+                'id': source.id,
+                'title': source.title,
+                'source_type': source.source_type,
+                'source_type_display': source.get_source_type_display(),
+                'url': source.web_link,
+            }
+            for source in event_obj.sources.all()
+        ]
+
+    def _event_images_payload(self, event_obj):
+        return [
+            {
+                'id': image.id,
+                'title': image.title,
+                'url': image.image.url if image.image else '',
+            }
+            for image in event_obj.images.all()
+        ]
+
     def get_data_quality_warnings(self):
         warnings = []
 
@@ -489,8 +511,11 @@ class Person(models.Model):
                     'date': e.date,
                     'event_type': e.event_type, 
                     'event_type_full': e.get_event_type_display(),
+                    'family_id': e.family_id,
                     'person_id': e.family.husband.id if e.family.wife == self else e.family.wife.id,
                     'person_name': e.family.husband.get_name() if e.family.wife == self else e.family.wife.get_name(),
+                    'sources': self._event_sources_payload(e),
+                    'images': self._event_images_payload(e),
                     'place': e.place, 
                     'id': e.id, 
                     'model_type': 'family'
@@ -541,6 +566,8 @@ class Person(models.Model):
                         'date': e.date,
                         'event_type': e.event_type, 
                         'event_type_full': e.get_event_type_display(),
+                        'sources': self._event_sources_payload(e),
+                        'images': self._event_images_payload(e),
                         'place': e.place, 
                         'id': e.id, 
                         'model_type': 'basic'
@@ -559,6 +586,8 @@ class Person(models.Model):
                                 'description': birth_event.description, 
                                 'event_type': 'birth',
                                 'event_type_full': 'Birth', 
+                                'sources': self._event_sources_payload(birth_event),
+                                'images': self._event_images_payload(birth_event),
                                 'place': birth_event.place, 
                                 'id': birth_event.id, 
                                 'model_type': 'basic'
@@ -573,6 +602,8 @@ class Person(models.Model):
                     'description': death_event.description, 
                     'event_type': 'death', 
                     'event_type_full': 'Death',
+                    'sources': self._event_sources_payload(death_event),
+                    'images': self._event_images_payload(death_event),
                     'place': death_event.place, 
                     'id': death_event.id, 
                     'model_type': 'basic'
@@ -680,6 +711,8 @@ class Event(models.Model):
     year = models.PositiveSmallIntegerField(null=True, blank=True)
     place = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
+    sources = models.ManyToManyField('Source', blank=True, related_name='person_events')
+    images = models.ManyToManyField('Image', blank=True, related_name='person_events')
 
     def clean(self):
         try:
@@ -728,6 +761,8 @@ class FamilyEvent(models.Model):
     year = models.PositiveSmallIntegerField(null=True, blank=True)
     place = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True, null=True)
+    sources = models.ManyToManyField('Source', blank=True, related_name='family_events')
+    images = models.ManyToManyField('Image', blank=True, related_name='family_events')
 
     def save(self, *args, **kwargs):
         if self.date:
@@ -754,8 +789,20 @@ class Archive(models.Model):
         return self.title
     
 class Source(models.Model):
-    archive = models.ForeignKey(Archive, on_delete=models.CASCADE)
+    SOURCE_TYPES = [
+        ('book', 'Book/Volume'),
+        ('parish', 'Parish Record'),
+        ('civil', 'Civil Record'),
+        ('website', 'Website'),
+        ('photo', 'Photo/Image'),
+        ('other', 'Other'),
+    ]
+
+    tree = models.ForeignKey(Tree, on_delete=models.CASCADE, related_name='sources', null=True, blank=True)
+    archive = models.ForeignKey(Archive, on_delete=models.SET_NULL, null=True, blank=True, related_name='sources')
     title = models.CharField(max_length=100)
+    source_type = models.CharField(max_length=20, choices=SOURCE_TYPES, default='other')
+    citation_text = models.TextField(blank=True)
     web_link = models.CharField(max_length=500, blank=True)
     description = models.CharField(max_length=1000, blank=True)
     publishing_date = models.CharField(max_length=50, blank=True)
@@ -811,9 +858,11 @@ def handle_family_cleanup(sender, instance, **kwargs):
         # Family with only one person and no children
         if not has_children:
             family.delete()
+            continue
         # Family with children and only one parent
         if (family.husband == instance and not family.wife) or (family.wife == instance and not family.husband):
             family.delete()
+            continue
         # Prevent partner from having multiple single parent families
         else:
             if family.husband == instance:
@@ -831,7 +880,7 @@ def handle_family_cleanup(sender, instance, **kwargs):
 
     children = Child.objects.filter(person=instance)
     for child in children:
-        if (child.family.husband and not child.family.wife) or (child.family.wife and not child.family.husband) and child.family.children.count() == 1:
+        if ((child.family.husband and not child.family.wife) or (child.family.wife and not child.family.husband)) and child.family.children.count() == 1:
             child.family.delete()
 
 # Removes the GEDCOM file when you remove a Tree instance

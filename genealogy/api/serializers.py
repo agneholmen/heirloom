@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from genealogy.models import Person, Tree
+from genealogy.models import Person, Tree, Archive, Source
 
 class TreeSerializer(serializers.ModelSerializer):
     people = serializers.SerializerMethodField()
@@ -57,3 +57,32 @@ class PersonSerializer(serializers.ModelSerializer):
     
     def get_details(self, obj):
         return obj.get_details_data()
+
+
+class ArchiveSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Archive
+        fields = ['id', 'tree', 'title', 'archive_id', 'publisher', 'author', 'description', 'web_link']
+        read_only_fields = ['id', 'tree']
+
+
+class SourceSerializer(serializers.ModelSerializer):
+    archive_title = serializers.CharField(source='archive.title', read_only=True)
+    source_type_display = serializers.CharField(source='get_source_type_display', read_only=True)
+
+    class Meta:
+        model = Source
+        fields = [
+            'id',
+            'tree',
+            'archive',
+            'archive_title',
+            'title',
+            'source_type',
+            'source_type_display',
+            'citation_text',
+            'web_link',
+            'description',
+            'publishing_date',
+        ]
+        read_only_fields = ['id', 'tree', 'archive_title', 'source_type_display']

@@ -11,10 +11,10 @@ from rest_framework.decorators import action
 
 from genealogy.constants import NAMES_REPLACE, SURNAMES_REPLACE
 from genealogy.date_functions import extract_year
-from genealogy.models import Person, Tree, Family, Child, Event, FamilyEvent, Image, ImagePerson
+from genealogy.models import Person, Tree, Family, Child, Event, FamilyEvent, Image, ImagePerson, Archive, Source
 from genealogy import gedcom
 from genealogy.views.common import get_default_image, get_profile_photo
-from .serializers import PersonSearchSerializer, PersonSerializer, TreeSerializer
+from .serializers import PersonSearchSerializer, PersonSerializer, TreeSerializer, ArchiveSerializer, SourceSerializer
 
 from functools import reduce
 
@@ -27,6 +27,10 @@ class PersonViewSet(ModelViewSet):
             tree__id=self.kwargs["tree_pk"],
             tree__user=self.request.user,
         )
+
+    @transaction.atomic
+    def perform_destroy(self, instance):
+        instance.delete()
     
     @action(detail=True, methods=['get'])
     def images(self, request, tree_pk=None, pk=None):
@@ -194,6 +198,27 @@ class PersonViewSet(ModelViewSet):
 
         return choices
 
+    def _parse_id_list(self, raw_value):
+        if raw_value is None:
+            return []
+
+        if isinstance(raw_value, str):
+            if not raw_value.strip():
+                return []
+            chunks = [item.strip() for item in raw_value.split(',') if item.strip()]
+            try:
+                return [int(item) for item in chunks]
+            except (TypeError, ValueError):
+                return None
+
+        if isinstance(raw_value, list):
+            try:
+                return [int(item) for item in raw_value]
+            except (TypeError, ValueError):
+                return None
+
+        return None
+
     @action(detail=True, methods=['get'])
     def life_event_options(self, request, tree_pk=None, pk=None):
         person = self.get_object()
@@ -219,10 +244,32 @@ class PersonViewSet(ModelViewSet):
             for family in families
         ]
 
+        sources = Source.objects.filter(tree=person.tree).select_related('archive').order_by('title')
+        person_images = ImagePerson.objects.filter(person=person).select_related('image')
+
         return Response({
             'person_event_types': person_event_types,
             'family_event_types': family_event_types,
             'families': family_choices,
+            'sources': [
+                {
+                    'id': source.id,
+                    'title': source.title,
+                    'source_type': source.source_type,
+                    'source_type_display': source.get_source_type_display(),
+                    'url': source.web_link,
+                    'archive_title': source.archive.title if source.archive else '',
+                }
+                for source in sources
+            ],
+            'images': [
+                {
+                    'id': image_person.image.id,
+                    'title': image_person.image.title,
+                    'url': image_person.image.image.url,
+                }
+                for image_person in person_images
+            ],
         })
 
     @action(detail=True, methods=['post'])
@@ -233,6 +280,13 @@ class PersonViewSet(ModelViewSet):
         date = (request.data.get('date') or '').strip()
         place = (request.data.get('place') or '').strip()
         description = (request.data.get('description') or '').strip()
+        source_ids = self._parse_id_list(request.data.get('source_ids', []))
+        image_ids = self._parse_id_list(request.data.get('image_ids', []))
+
+        if source_ids is None:
+            return Response({'error': 'Invalid source IDs.'}, status=status.HTTP_400_BAD_REQUEST)
+        if image_ids is None:
+            return Response({'error': 'Invalid image IDs.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not event_type:
             return Response({'error': 'Event type is required.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -261,6 +315,18 @@ class PersonViewSet(ModelViewSet):
                 place=place,
                 description=description,
             )
+
+            if source_ids:
+                sources = Source.objects.filter(id__in=source_ids, tree=person.tree)
+                if sources.count() != len(set(source_ids)):
+                    return Response({'error': 'One or more selected sources are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+                event.sources.set(sources)
+
+            if image_ids:
+                images = Image.objects.filter(id__in=image_ids, tree=person.tree)
+                if images.count() != len(set(image_ids)):
+                    return Response({'error': 'One or more selected images are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+                event.images.set(images)
 
             return Response({
                 'message': 'Event added successfully',
@@ -295,6 +361,18 @@ class PersonViewSet(ModelViewSet):
                 description=description,
             )
 
+            if source_ids:
+                sources = Source.objects.filter(id__in=source_ids, tree=person.tree)
+                if sources.count() != len(set(source_ids)):
+                    return Response({'error': 'One or more selected sources are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+                event.sources.set(sources)
+
+            if image_ids:
+                images = Image.objects.filter(id__in=image_ids, tree=person.tree)
+                if images.count() != len(set(image_ids)):
+                    return Response({'error': 'One or more selected images are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+                event.images.set(images)
+
             return Response({
                 'message': 'Family event added successfully',
                 'id': event.id,
@@ -318,6 +396,16 @@ class PersonViewSet(ModelViewSet):
         date = (request.data.get('date') or '').strip()
         place = (request.data.get('place') or '').strip()
         description = (request.data.get('description') or '').strip()
+        has_source_ids = 'source_ids' in request.data
+        has_image_ids = 'image_ids' in request.data
+
+        source_ids = self._parse_id_list(request.data.get('source_ids')) if has_source_ids else None
+        image_ids = self._parse_id_list(request.data.get('image_ids')) if has_image_ids else None
+
+        if has_source_ids and source_ids is None:
+            return Response({'error': 'Invalid source IDs.'}, status=status.HTTP_400_BAD_REQUEST)
+        if has_image_ids and image_ids is None:
+            return Response({'error': 'Invalid image IDs.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not (date or place or description):
             return Response({'error': 'You must fill out at least one of the fields.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -344,6 +432,18 @@ class PersonViewSet(ModelViewSet):
         event.description = description
         event.save()
 
+        if has_source_ids:
+            sources = Source.objects.filter(id__in=source_ids, tree=person.tree)
+            if sources.count() != len(set(source_ids)):
+                return Response({'error': 'One or more selected sources are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+            event.sources.set(sources)
+
+        if has_image_ids:
+            images = Image.objects.filter(id__in=image_ids, tree=person.tree)
+            if images.count() != len(set(image_ids)):
+                return Response({'error': 'One or more selected images are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+            event.images.set(images)
+
         return Response({'message': 'Event updated successfully.'}, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['patch', 'delete'], url_path='family-events/(?P<event_id>[^/.]+)')
@@ -365,6 +465,16 @@ class PersonViewSet(ModelViewSet):
         date = (request.data.get('date') or '').strip()
         place = (request.data.get('place') or '').strip()
         description = (request.data.get('description') or '').strip()
+        has_source_ids = 'source_ids' in request.data
+        has_image_ids = 'image_ids' in request.data
+
+        source_ids = self._parse_id_list(request.data.get('source_ids')) if has_source_ids else None
+        image_ids = self._parse_id_list(request.data.get('image_ids')) if has_image_ids else None
+
+        if has_source_ids and source_ids is None:
+            return Response({'error': 'Invalid source IDs.'}, status=status.HTTP_400_BAD_REQUEST)
+        if has_image_ids and image_ids is None:
+            return Response({'error': 'Invalid image IDs.'}, status=status.HTTP_400_BAD_REQUEST)
 
         if not (date or place or description):
             return Response({'error': 'You must fill out at least one of the fields.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -382,6 +492,18 @@ class PersonViewSet(ModelViewSet):
         event.place = place
         event.description = description
         event.save()
+
+        if has_source_ids:
+            sources = Source.objects.filter(id__in=source_ids, tree=person.tree)
+            if sources.count() != len(set(source_ids)):
+                return Response({'error': 'One or more selected sources are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+            event.sources.set(sources)
+
+        if has_image_ids:
+            images = Image.objects.filter(id__in=image_ids, tree=person.tree)
+            if images.count() != len(set(image_ids)):
+                return Response({'error': 'One or more selected images are invalid.'}, status=status.HTTP_400_BAD_REQUEST)
+            event.images.set(images)
 
         return Response({'message': 'Family event updated successfully.'}, status=status.HTTP_200_OK)
 
@@ -846,6 +968,73 @@ class TreeViewSet(ModelViewSet):
         if instance.gedcom_file:
             instance.gedcom_file.delete(save=False)
         instance.delete()
+
+    @action(detail=True, methods=['get', 'post'], url_path='archives')
+    def archives(self, request, pk=None):
+        tree = self.get_object()
+
+        if request.method == 'GET':
+            archives = Archive.objects.filter(tree=tree).order_by('title')
+            serializer = ArchiveSerializer(archives, many=True)
+            return Response(serializer.data)
+
+        serializer = ArchiveSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(tree=tree)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch', 'delete'], url_path='archives/(?P<archive_id>[^/.]+)')
+    def archive_detail(self, request, pk=None, archive_id=None):
+        tree = self.get_object()
+        archive = get_object_or_404(Archive, id=archive_id, tree=tree)
+
+        if request.method == 'DELETE':
+            archive.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        serializer = ArchiveSerializer(archive, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get', 'post'], url_path='sources')
+    def sources(self, request, pk=None):
+        tree = self.get_object()
+
+        if request.method == 'GET':
+            sources = Source.objects.filter(tree=tree).select_related('archive').order_by('title')
+            serializer = SourceSerializer(sources, many=True)
+            return Response(serializer.data)
+
+        serializer = SourceSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        archive = None
+        archive_id = serializer.validated_data.get('archive')
+        if archive_id:
+            archive = get_object_or_404(Archive, id=archive_id.id, tree=tree)
+
+        serializer.save(tree=tree, archive=archive)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch', 'delete'], url_path='sources/(?P<source_id>[^/.]+)')
+    def source_detail(self, request, pk=None, source_id=None):
+        tree = self.get_object()
+        source = get_object_or_404(Source, id=source_id, tree=tree)
+
+        if request.method == 'DELETE':
+            source.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        serializer = SourceSerializer(source, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        archive = serializer.validated_data.get('archive', source.archive)
+        if archive:
+            archive = get_object_or_404(Archive, id=archive.id, tree=tree)
+
+        serializer.save(archive=archive)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['get'], url_path='data_quality')
     def data_quality(self, request, pk=None):
