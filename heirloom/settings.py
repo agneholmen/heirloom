@@ -86,7 +86,7 @@ TEMPLATES = [
 WSGI_APPLICATION = 'heirloom.wsgi.application'
 
 REST_FRAMEWORK = {
-    'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
+    'EXCEPTION_HANDLER': 'heirloom.api_errors.api_exception_handler',
     'NON_FIELD_ERRORS_KEY': 'error',
     'DEFAULT_RENDERER_CLASSES': (
         'rest_framework.renderers.JSONRenderer',
@@ -192,6 +192,9 @@ LOGIN_URL = '/users/login'
 LOGOUT_URL = 'logout'
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'Project Heirloom <no-reply@localhost>')
+FRONTEND_BASE_URL = os.getenv('FRONTEND_BASE_URL', 'http://localhost:3000')
+PASSWORD_RESET_TIMEOUT = 60 * 30
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
